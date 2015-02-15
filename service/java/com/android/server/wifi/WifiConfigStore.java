@@ -261,6 +261,8 @@ public class WifiConfigStore extends IpConfigStore {
             = "ASSOCIATED_FULL_SCAN_BACKOFF_PERIOD:   ";
     private static final String ALWAYS_ENABLE_SCAN_WHILE_ASSOCIATED_KEY
             = "ALWAYS_ENABLE_SCAN_WHILE_ASSOCIATED:   ";
+    private static final String AUTO_JOIN_SCAN_INTERVAL_WHEN_P2P_CONNECTED_KEY
+            = "AUTO_JOIN_SCAN_INTERVAL_WHEN_P2P_CONNECTED:   ";
     private static final String ONLY_LINK_SAME_CREDENTIAL_CONFIGURATIONS_KEY
             = "ONLY_LINK_SAME_CREDENTIAL_CONFIGURATIONS:   ";
 
@@ -351,6 +353,7 @@ public class WifiConfigStore extends IpConfigStore {
     boolean showNetworks = true; // TODO set this back to false, used for debugging 17516271
 
     public int alwaysEnableScansWhileAssociated = 0;
+    public int autoJoinScanIntervalWhenP2pConnected = 300000;
 
     public int maxNumActiveChannelsForPartialScans = 6;
     public int maxNumPassiveChannelsForPartialScans = 2;
@@ -1407,8 +1410,32 @@ public class WifiConfigStore extends IpConfigStore {
 
             if (mNetworkIds.containsKey(configKey(config))) {
                 // That SSID is already known, just ignore this duplicate entry
-                if (showNetworks) localLog("discarded duplicate network ", config.networkId);
-            } else if(config.isValid()){
+                if (showNetworks)
+                    localLog("Duplicate network found ", config.networkId);
+
+                Integer n = mNetworkIds.get(configKey(config));
+                WifiConfiguration tempCfg = mConfiguredNetworks.get(n);
+
+                if ( (tempCfg != null &&
+                      tempCfg.status != WifiConfiguration.Status.CURRENT) &&
+                      config.status == WifiConfiguration.Status.CURRENT) {
+
+                    // Clear the existing entry, we don't need it
+                    mConfiguredNetworks.remove(tempCfg.networkId);
+                    mNetworkIds.remove(configKey(tempCfg));
+
+                    // Add current entry to the list
+                    mConfiguredNetworks.put(config.networkId, config);
+                    mNetworkIds.put(configKey(config), config.networkId);
+
+                    // Enable AutoJoin status and indicate the network as
+                    // duplicate The duplicateNetwork flag will be used
+                    // to decide whether to restore network configurations
+                    // in readNetworkHistory() along with IP and proxy settings
+                    config.setAutoJoinStatus(WifiConfiguration.AUTO_JOIN_ENABLED);
+                    config.duplicateNetwork = true;
+                }
+            } else if (config.isValid()) {
                 mConfiguredNetworks.put(config.networkId, config);
                 mNetworkIds.put(configKey(config), config.networkId);
                 if (showNetworks) localLog("loaded configured network", config.networkId);
@@ -1452,6 +1479,35 @@ public class WifiConfigStore extends IpConfigStore {
                 }
             }
         }
+    }
+
+    public int getNetworkIdFromSsid(String ssid) {
+        int networkId = 0;
+        int ret = -1;
+        String listStr = mWifiNative.listNetworks();
+        if (VDBG) loge("getNetworkIdFromSsid " + ssid);
+        if (listStr == null)
+            return -1;
+        String[] lines = listStr.split("\n");
+
+        /* Skip the first line, which is a header */
+        for (int i = 1; i < lines.length; i++) {
+            String[] result = lines[i].split("\t");
+            if (VDBG) loge("getNetworkIdFromSsid " + result[1]);
+            /* network-id | ssid | bssid | flags */
+
+            if (result[1].equals(ssid)) {
+                try {
+                    networkId = Integer.parseInt(result[0]);
+                    if (VDBG) loge("getNetworkIdFromSsid " + networkId);
+                    return networkId;
+                } catch(NumberFormatException e) {
+                    loge("Failed to read network-id '" + result[0] + "'");
+                    continue;
+                }
+            }
+        }
+        return -1;
     }
 
     private Map<String, String> readNetworkVariablesFromSupplicantFile(String key) {
@@ -1808,7 +1864,7 @@ public class WifiConfigStore extends IpConfigStore {
                     rssi = WifiConfiguration.INVALID_RSSI;
                     caps = null;
 
-                } else if (config != null) {
+                } else if (config != null && config.duplicateNetwork == false) {
                     if (key.startsWith(SSID_KEY)) {
                         ssid = key.replace(SSID_KEY, "");
                         ssid = ssid.replace(SEPARATOR_KEY, "");
@@ -2427,6 +2483,31 @@ public class WifiConfigStore extends IpConfigStore {
                         Log.d(TAG,"readAutoJoinConfig: incorrect format :" + key);
                     }
                 }
+                if (key.startsWith(
+                    AUTO_JOIN_SCAN_INTERVAL_WHEN_P2P_CONNECTED_KEY)) {
+                    int scanInterval;
+                    String st = key.replace(
+                                AUTO_JOIN_SCAN_INTERVAL_WHEN_P2P_CONNECTED_KEY,
+                                "");
+                    st = st.replace(SEPARATOR_KEY, "");
+                    try {
+                        scanInterval = Integer.parseInt(st);
+                        if (scanInterval >= 10000) {
+                            autoJoinScanIntervalWhenP2pConnected = scanInterval;
+                        } else {
+                            Log.d(TAG,
+                                  "Cfg value is less then 10sec, Using default="
+                                  + autoJoinScanIntervalWhenP2pConnected);
+                        }
+                        Log.d(TAG, "readAutoJoinConfig: " +
+                              "autoJoinScanIntervalWhenP2pConnected = "
+                              + Integer.toString(
+                              autoJoinScanIntervalWhenP2pConnected));
+                    } catch (NumberFormatException e) {
+                        Log.d(TAG, "readAutoJoinConfig: incorrect format :" +
+                              key);
+                    }
+                }
             }
         } catch (EOFException ignore) {
             if (reader != null) {
@@ -2483,10 +2564,13 @@ public class WifiConfigStore extends IpConfigStore {
             int id = networks.keyAt(i);
             WifiConfiguration config = mConfiguredNetworks.get(mNetworkIds.get(id));
 
-
             if (config == null || config.autoJoinStatus == WifiConfiguration.AUTO_JOIN_DELETED) {
                 loge("configuration found for missing network, nid=" + id
                         +", ignored, networks.size=" + Integer.toString(networks.size()));
+            } else if (config != null && config.duplicateNetwork == true) {
+                if (VDBG)
+                    loge("Network configuration is not updated for duplicate network id="
+                          + config.networkId + " SSID=" + config.SSID);
             } else {
                 config.setIpConfiguration(networks.valueAt(i));
             }
@@ -2565,6 +2649,23 @@ public class WifiConfigStore extends IpConfigStore {
                         WifiConfiguration.bssidVarName,
                         config.BSSID)) {
                     loge("failed to set BSSID: " + config.BSSID);
+                    break setVariables;
+                }
+            }
+
+            if (config.isIBSS) {
+                if(!mWifiNative.setNetworkVariable(
+                        netId,
+                        WifiConfiguration.modeVarName,
+                        "1")) {
+                    loge("failed to set adhoc mode");
+                    break setVariables;
+                }
+                if(!mWifiNative.setNetworkVariable(
+                        netId,
+                        WifiConfiguration.frequencyVarName,
+                        Integer.toString(config.frequency))) {
+                    loge("failed to set frequency");
                     break setVariables;
                 }
             }
@@ -3408,6 +3509,24 @@ public class WifiConfigStore extends IpConfigStore {
             }
         }
 
+        value = mWifiNative.getNetworkVariable(netId, WifiConfiguration.modeVarName);
+        config.isIBSS = false;
+        if (!TextUtils.isEmpty(value)) {
+            try {
+                config.isIBSS = Integer.parseInt(value) != 0;
+            } catch (NumberFormatException ignore) {
+            }
+        }
+
+        value = mWifiNative.getNetworkVariable(netId, WifiConfiguration.frequencyVarName);
+        config.frequency = 0;
+        if (!TextUtils.isEmpty(value)) {
+            try {
+                config.frequency = Integer.parseInt(value);
+            } catch (NumberFormatException ignore) {
+            }
+        }
+
         value = mWifiNative.getNetworkVariable(netId, WifiConfiguration.wepTxKeyIdxVarName);
         config.wepTxKeyIndex = -1;
         if (!TextUtils.isEmpty(value)) {
@@ -3804,6 +3923,29 @@ public class WifiConfigStore extends IpConfigStore {
             }
         }
         return found;
+    }
+
+    void handleDisabledAPs( boolean enable, String BSSID, int reason) {
+        if (BSSID == null)
+            return;
+        for (WifiConfiguration config : mConfiguredNetworks.values()) {
+            if (config.scanResultCache != null) {
+                for (ScanResult result: config.scanResultCache.values()) {
+                    if (result.BSSID.equals(BSSID)) {
+                        if (enable) {
+                            config.BSSID = "any";
+                            result.setAutoJoinStatus(ScanResult.ENABLED);
+                            // enable auto join for the blacklisted BSSID
+                            config.setAutoJoinStatus(WifiConfiguration.AUTO_JOIN_ENABLED);
+                        } else {
+                            result.setAutoJoinStatus(ScanResult.AUTO_ROAM_DISABLED);
+                            config.BSSID = BSSID;
+                            config.setAutoJoinStatus(WifiConfiguration.AUTO_JOIN_TEMPORARY_DISABLED);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     int getMaxDhcpRetries() {

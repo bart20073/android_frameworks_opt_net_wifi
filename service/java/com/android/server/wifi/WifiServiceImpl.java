@@ -124,6 +124,8 @@ public final class WifiServiceImpl extends IWifiManager.Stub {
 
     final boolean mBatchedScanSupported;
 
+     private boolean mIsControllerStarted = false;
+
     /**
      * Asynchronous channel to WifiStateMachine
      */
@@ -351,6 +353,8 @@ public final class WifiServiceImpl extends IWifiManager.Stub {
         registerForBroadcasts();
 
         mWifiController.start();
+
+        mIsControllerStarted = true;
 
         // If we are already disabled (could be due to airplane mode), avoid changing persist
         // state here
@@ -664,6 +668,11 @@ public final class WifiServiceImpl extends IWifiManager.Stub {
             }
         } finally {
             Binder.restoreCallingIdentity(ident);
+        }
+
+        if (!mIsControllerStarted) {
+            Slog.e(TAG,"WifiController is not yet started, abort setWifiEnabled");
+            return false;
         }
 
         mWifiController.sendMessage(CMD_WIFI_TOGGLED);
@@ -1083,6 +1092,21 @@ public final class WifiServiceImpl extends IWifiManager.Stub {
                 com.android.internal.R.bool.config_wifi_dual_band_support);
     }
 
+     /**
+     * Is Ad-Hoc (IBSS) mode supported by the driver?
+     * Will only return correct results when we have reached WIFI_STATE_ENABLED
+     * @return {@code true} if IBSS mode is supported, {@code false} if not
+     */
+    public boolean isIbssSupported() {
+        enforceAccessPermission();
+        if (mWifiStateMachineChannel != null) {
+            return (mWifiStateMachine.syncIsIbssSupported(mWifiStateMachineChannel) == 1);
+        } else {
+            Slog.e(TAG, "mWifiStateMachineChannel is not initialized");
+            return false;
+        }
+    }
+
     /**
      * Return the DHCP-assigned addresses from the last successful DHCP request,
      * if any.
@@ -1097,7 +1121,10 @@ public final class WifiServiceImpl extends IWifiManager.Stub {
 
         if (dhcpResults.ipAddress != null &&
                 dhcpResults.ipAddress.getAddress() instanceof Inet4Address) {
-            info.ipAddress = NetworkUtils.inetAddressToInt((Inet4Address) dhcpResults.ipAddress.getAddress());
+            info.ipAddress = NetworkUtils.inetAddressToInt(
+               (Inet4Address) dhcpResults.ipAddress.getAddress());
+            info.netmask = NetworkUtils.prefixLengthToNetmaskInt(
+               dhcpResults.ipAddress.getNetworkPrefixLength());
         }
 
         if (dhcpResults.gateway != null) {
@@ -1768,10 +1795,6 @@ public final class WifiServiceImpl extends IWifiManager.Stub {
     public void enableVerboseLogging(int verbose) {
         enforceAccessPermission();
         mWifiStateMachine.enableVerboseLogging(verbose);
-    }
-
-    public void enableRssiThreshold(int enabled) {
-        mWifiStateMachine.enableRssiThreshold(enabled);
     }
 
     public int getVerboseLoggingLevel() {

@@ -50,7 +50,6 @@ public class WifiAutoJoinController {
     private WifiNetworkScoreCache mNetworkScoreCache;
 
     private static final String TAG = "WifiAutoJoinController ";
-    private static boolean mRssiThreshold = false;
     private static boolean DBG = false;
     private static boolean VDBG = false;
     private static final boolean mStaStaSupported = false;
@@ -62,6 +61,8 @@ public class WifiAutoJoinController {
 
     private HashMap<String, ScanResult> scanResultCache =
             new HashMap<String, ScanResult>();
+
+    private ArrayList<String> mBlacklistedBssids;
 
     private WifiConnectionStatistics mWifiConnectionStatistics;
 
@@ -118,14 +119,7 @@ public class WifiAutoJoinController {
                     + " service " + Context.NETWORK_SCORE_SERVICE);
             mNetworkScoreCache = null;
         }
-    }
-
-    void enableRssiThreshold(int enabled) {
-        if (enabled > 0 ) {
-            mRssiThreshold = true;
-        } else {
-            mRssiThreshold = false;
-        }
+        mBlacklistedBssids = new ArrayList<String>();
     }
 
     void enableVerboseLogging(int verbose) {
@@ -1108,6 +1102,29 @@ public class WifiAutoJoinController {
         return startScore;
     }
 
+    void handleBSSIDBlackList(boolean enable, String bssid, int reason) {
+        if( 5 == reason ) // Enable Auto Join for all BSSIDs
+        {
+            mBlacklistedBssids.clear();
+            return;
+        }
+        if( !enable ) {
+            if( !mBlacklistedBssids.contains(bssid) )
+            {
+                mBlacklistedBssids.add(bssid);
+            }
+        }
+        else {
+            if( mBlacklistedBssids.contains(bssid) ) {
+                mBlacklistedBssids.remove(bssid);
+            }
+        }
+    }
+
+    boolean isBlacklistedBSSID( String bssid ) {
+        return ( mBlacklistedBssids.contains(bssid) ) ? true : false;
+    }
+
     /**
      * attemptAutoJoin() function implements the core of the a network switching algorithm
      */
@@ -1237,6 +1254,12 @@ public class WifiAutoJoinController {
                 continue;
             }
 
+            if ( this.isBlacklistedBSSID(config.BSSID) ) {
+                logDbg("attemptAutoJoin skip candidate as AP is Blacklisted config.SSID = "
+                        + config.SSID + " config.BSSID=" + config.BSSID);
+                continue;
+            }
+
             if (config.autoJoinStatus >=
                     WifiConfiguration.AUTO_JOIN_DISABLED_ON_AUTH_FAILURE) {
                 // Avoid networks disabled because of AUTH failure altogether
@@ -1270,12 +1293,10 @@ public class WifiAutoJoinController {
                 }
             }
 
-            if (DBG) logDbg("Rssi Threshold check " + mRssiThreshold);
-
             // Try to unblacklist based on good visibility
-            if ((mRssiThreshold) &&
-                 (config.visibility.rssi5 < mWifiConfigStore.thresholdUnblacklistThreshold5Soft
-                  && config.visibility.rssi24 < mWifiConfigStore.thresholdUnblacklistThreshold24Soft)) {
+            if (config.visibility.rssi5 < mWifiConfigStore.thresholdUnblacklistThreshold5Soft
+                    && config.visibility.rssi24
+                    < mWifiConfigStore.thresholdUnblacklistThreshold24Soft) {
                 if (DBG) {
                     logDbg("attemptAutoJoin do not unblacklist due to low visibility "
                             + config.autoJoinStatus
@@ -1285,9 +1306,9 @@ public class WifiAutoJoinController {
                             + ") num=(" + config.visibility.num24
                             + "," + config.visibility.num5 + ")");
                 }
-            } else if ((mRssiThreshold) &&
-                       (config.visibility.rssi5 < mWifiConfigStore.thresholdUnblacklistThreshold5Hard
-                        && config.visibility.rssi24 < mWifiConfigStore.thresholdUnblacklistThreshold24Hard)) {
+            } else if (config.visibility.rssi5 < mWifiConfigStore.thresholdUnblacklistThreshold5Hard
+                    && config.visibility.rssi24
+                    < mWifiConfigStore.thresholdUnblacklistThreshold24Hard) {
                 // If the network is simply temporary disabled, don't allow reconnect until
                 // RSSI becomes good enough
                 config.setAutoJoinStatus(config.autoJoinStatus - 1);
@@ -1343,10 +1364,10 @@ public class WifiAutoJoinController {
                 continue;
             }
             int boost = config.autoJoinUseAggressiveJoinAttemptThreshold + weakRssiBailCount;
-            if ((mRssiThreshold) && ((config.visibility.rssi5 + boost)
+            if ((config.visibility.rssi5 + boost)
                         < mWifiConfigStore.thresholdInitialAutoJoinAttemptMin5RSSI
                         && (config.visibility.rssi24 + boost)
-                        < mWifiConfigStore.thresholdInitialAutoJoinAttemptMin24RSSI)) {
+                        < mWifiConfigStore.thresholdInitialAutoJoinAttemptMin24RSSI) {
                 if (DBG) {
                     logDbg("attemptAutoJoin skip due to low visibility -> status="
                             + config.autoJoinStatus
